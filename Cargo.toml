@@ -1,0 +1,14 @@
+[package]
+name = "stigmergy"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.75"
+description = "Координация следами в среде: ни доски, ни очереди, ни владельца"
+license = "MIT"
+
+# Ноль зависимостей: ни serde, ни HTTP-клиентов. Формат следа — плоский текст.
+[dependencies]
+
+[[bin]]
+name = "stig"
+path = "src/main.rs"
