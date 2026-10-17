@@ -9,6 +9,9 @@
 
 use std::process::Command;
 
+use stigmergy::checo::{simulate, Fate, Plan, Worker};
+use stigmergy::consent::{Circle, Verb, Verdict};
+use stigmergy::dial::{Meters, PAIN};
 use stigmergy::env::{now, Env, Kind, Trace};
 
 struct Opts {
@@ -32,6 +35,15 @@ impl Opts {
     fn number(&self, name: &str) -> Option<u64> {
         self.flag(name).and_then(|value| value.parse().ok())
     }
+    fn many(&self, name: &str) -> Vec<&str> {
+        let spelled = format!("--{name}");
+        self.args
+            .iter()
+            .enumerate()
+            .filter(|(_, item)| item.as_str() == spelled.as_str())
+            .filter_map(|(index, _)| self.args.get(index + 1).map(String::as_str))
+            .collect()
+    }
     fn has(&self, name: &str) -> bool {
         let spelled = format!("--{name}");
         self.args
@@ -46,6 +58,10 @@ fn main() {
         Some("need") => cmd_need(&args[1..]),
         Some("status") => cmd_status(&args[1..]),
         Some("work") => cmd_work(&args[1..]),
+        Some("lad") => cmd_lad(&args[1..]),
+        Some("dial") => cmd_dial(&args[1..], true),
+        Some("dials") => cmd_dial(&args[1..], false),
+        Some("checo") => cmd_checo(&args[1..]),
         Some("demo") => cmd_demo(),
         Some("--help") | Some("-h") | None => {
             print_help();
@@ -265,6 +281,273 @@ fn truncate(text: &str, width: usize) -> String {
         + "…"
 }
 
+// --- лад: русский консенсус --------------------------------------------------------
+fn cmd_lad(args: &[String]) -> i32 {
+    let opts = Opts::parse(args);
+    let Some(env_path) = opts.flag("env") else {
+        eprintln!("нужен --env DIR");
+        return 2;
+    };
+    let circle = match Circle::open(env_path) {
+        Ok(circle) => circle,
+        Err(err) => {
+            eprintln!("не открыть круг: {err}");
+            return 2;
+        }
+    };
+    let at = opts.number("now").unwrap_or_else(now);
+    match args.first().map(String::as_str) {
+        Some("open") => {
+            let id = opts.flag("id").unwrap_or("q1");
+            let text = opts.flag("text").unwrap_or("без вопроса");
+            let members: Vec<&str> = opts
+                .flag("members")
+                .unwrap_or("")
+                .split(',')
+                .map(str::trim)
+                .filter(|m| !m.is_empty())
+                .collect();
+            if members.is_empty() {
+                eprintln!("нужен --members \"а,б,в\"");
+                return 2;
+            }
+            let window = opts.number("window").unwrap_or(3600);
+            match circle.open_question(id, text, &members, window) {
+                Ok(question) => {
+                    println!(
+                        "круг открыт: «{}», участников {}, срок {} ({})",
+                        question.text,
+                        question.members.len(),
+                        human_age(window),
+                        id
+                    );
+                    0
+                }
+                Err(err) => {
+                    eprintln!("не открыть: {err}");
+                    2
+                }
+            }
+        }
+        Some("say") => {
+            let id = opts.flag("id").unwrap_or("q1");
+            let who = opts.flag("who").unwrap_or("");
+            let verb = match opts.flag("verb").unwrap_or("лад") {
+                "лад" => Verb::Lad,
+                "возражение" => Verb::Objection,
+                other => {
+                    eprintln!("неизвестное слово: {other} (лад или возражение)");
+                    return 2;
+                }
+            };
+            let Some(mut question) = circle.find(id) else {
+                eprintln!("вопроса {id} нет в кругу");
+                return 2;
+            };
+            match question.speak(who, verb, opts.flag("reason").unwrap_or(""), at) {
+                Ok(()) => {
+                    if let Err(err) = circle.put(&question) {
+                        eprintln!("не записать слово: {err}");
+                        return 2;
+                    }
+                    println!("{who}: {}", verb.as_str());
+                    0
+                }
+                Err(why) => {
+                    eprintln!("отказано: {why}");
+                    1
+                }
+            }
+        }
+        _ => {
+            let questions = match opts.flag("id") {
+                Some(id) => circle.find(id).into_iter().collect(),
+                None => circle.questions(),
+            };
+            if questions.is_empty() {
+                println!("круг пуст");
+                return 0;
+            }
+            for question in questions {
+                println!("«{}» ({})", question.text, question.id);
+                for statement in &question.statements {
+                    println!(
+                        "  {:<10} {:<12} {}",
+                        statement.member,
+                        statement.verb.as_str(),
+                        statement.reason
+                    );
+                }
+                match question.verdict(at) {
+                    Verdict::Lad { answered, silent } => {
+                        println!(
+                            "  лад: сказали {}, промолчали {} — и они в ответе{}",
+                            answered,
+                            silent.len(),
+                            if silent.is_empty() {
+                                String::new()
+                            } else {
+                                format!(": {}", silent.join(", "))
+                            }
+                        );
+                    }
+                    Verdict::Blocked { by, reason } => {
+                        println!("  не лад: возражает {by} — «{reason}»");
+                    }
+                    Verdict::Pending { left, next } => {
+                        println!(
+                            "  идёт: осталось {}, следующий по кругу — {}",
+                            human_age(left),
+                            next.unwrap_or_else(|| "все сказали".to_string())
+                        );
+                    }
+                }
+            }
+            0
+        }
+    }
+}
+
+// --- алгедОнический метр -----------------------------------------------------------
+fn cmd_dial(args: &[String], set: bool) -> i32 {
+    let opts = Opts::parse(args);
+    let Some(env_path) = opts.flag("env") else {
+        eprintln!("нужен --env DIR");
+        return 2;
+    };
+    let meters = match Meters::open(env_path) {
+        Ok(meters) => meters,
+        Err(err) => {
+            eprintln!("не открыть метры: {err}");
+            return 2;
+        }
+    };
+    let at = opts.number("now").unwrap_or_else(now);
+    if set {
+        let (Some(who), Some(value)) = (opts.flag("who"), opts.number("value")) else {
+            eprintln!("нужны --who и --value 0..100");
+            return 2;
+        };
+        match meters.set(who, value as f64, opts.flag("note").unwrap_or(""), at) {
+            Ok(dial) => {
+                println!(
+                    "{who}: стрелка на {} {}{}",
+                    dial.value,
+                    if dial.is_pain(at) {
+                        "— это боль"
+                    } else {
+                        ""
+                    },
+                    if dial.note.is_empty() {
+                        String::new()
+                    } else {
+                        format!(" («{}»)", dial.note)
+                    }
+                );
+                0
+            }
+            Err(err) => {
+                eprintln!("не записать: {err}");
+                2
+            }
+        }
+    } else {
+        let all = meters.all();
+        if all.is_empty() {
+            println!("ни одного показания: человеческого слова в системе нет");
+            return 0;
+        }
+        for dial in all {
+            let now_value = dial.current(at);
+            println!(
+                "{:<10} {:>5.0} ({:>4.0}) {}{}",
+                dial.by,
+                dial.value,
+                now_value,
+                if now_value >= PAIN { "БОЛЬ " } else { "" },
+                dial.note
+            );
+        }
+        0
+    }
+}
+
+// --- ЧЕКО: «что если» --------------------------------------------------------------
+fn cmd_checo(args: &[String]) -> i32 {
+    let opts = Opts::parse(args);
+    let Some(env_path) = opts.flag("env") else {
+        eprintln!("нужен --env DIR");
+        return 2;
+    };
+    let env = match Env::open(env_path) {
+        Ok(env) => env,
+        Err(err) => {
+            eprintln!("не открыть среду: {err}");
+            return 2;
+        }
+    };
+    let workers: Vec<Worker> = opts
+        .many("worker")
+        .into_iter()
+        .filter_map(Worker::parse)
+        .collect();
+    if workers.is_empty() {
+        eprintln!("нужен хотя бы один --worker способность:сколько:секунд");
+        return 2;
+    }
+    let plan = Plan {
+        workers,
+        horizon: opts.number("horizon").unwrap_or(86_400),
+        step: 60,
+    };
+    let at = opts.number("now").unwrap_or_else(now);
+    let needs = env.traces();
+    let outcomes = simulate(&needs, &plan, at);
+    if outcomes.is_empty() {
+        println!("в среде нечего моделировать");
+        return 0;
+    }
+    let mut died = 0;
+    for outcome in &outcomes {
+        match outcome.fate {
+            Fate::Done(finish) => println!(
+                "  {:>8}  {} [{}]",
+                human_age(finish.saturating_sub(at)),
+                truncate(&outcome.object, 40),
+                outcome.need
+            ),
+            Fate::Died(dead) => {
+                died += 1;
+                println!(
+                    "  {:>8}  {} — умрёт молча, никто не возьмёт",
+                    human_age(dead.saturating_sub(at)),
+                    truncate(&outcome.object, 40)
+                );
+            }
+            Fate::Alive => println!(
+                "  {:>8}  {} — доживёт до конца горизонта",
+                "—",
+                truncate(&outcome.object, 40)
+            ),
+        }
+    }
+    println!(
+        "\nплан: {} проверок, {} умрут молча{}",
+        outcomes.len(),
+        died,
+        if died > 0 {
+            " — это и есть то, что увидел бы Бир в ЧЕКО"
+        } else {
+            ""
+        }
+    );
+    if died > 0 {
+        1
+    } else {
+        0
+    }
+}
+
 // --- демонстрация -----------------------------------------------------------------
 fn cmd_demo() -> i32 {
     let mut checks = 0;
@@ -384,6 +667,109 @@ fn cmd_demo() -> i32 {
                 .join(", ")
         ),
     );
+
+    // --- лад: русский консенсус ---
+    {
+        use stigmergy::consent::Question;
+        let circle = Circle::open(dir.join("lad")).unwrap();
+        let mut q = Question::new(
+            "q1",
+            "делать ли релиз",
+            &["анна", "борис", "вера"],
+            t0,
+            3600,
+        );
+        circle.put(&q).unwrap();
+        check(
+            "в кругу не перебивают",
+            q.speak("вера", Verb::Lad, "", t0 + 1).is_err(),
+            format!("сейчас говорит {}", q.next_speaker().unwrap_or("—")),
+        );
+        q.speak("анна", Verb::Lad, "", t0 + 2).unwrap();
+        q.speak("борис", Verb::Objection, "нет тестов", t0 + 3)
+            .unwrap();
+        q.speak("вера", Verb::Lad, "", t0 + 4).unwrap();
+        check(
+            "возражение блокирует дело",
+            matches!(q.verdict(t0 + 3600), Verdict::Blocked { .. }),
+            "не большинство решает, а снятое возражение".to_string(),
+        );
+        check(
+            "круг кончился — открыт второй",
+            q.round() == 2 && q.next_speaker() == Some("анна"),
+            "в нём возражение можно снять".to_string(),
+        );
+        q.speak("анна", Verb::Lad, "", t0 + 5).unwrap();
+        q.speak("борис", Verb::Lad, "тесты появились", t0 + 6)
+            .unwrap();
+        q.speak("вера", Verb::Lad, "", t0 + 7).unwrap();
+        check(
+            "снятое возражение даёт лад",
+            matches!(q.verdict(t0 + 3600), Verdict::Lad { .. }),
+            "дело идёт".to_string(),
+        );
+    }
+
+    // --- алгедОнический метр ---
+    {
+        let meters = Meters::open(dir.join("dial")).unwrap();
+        meters.set("анна", 70.0, "не то делаем", t0).unwrap();
+        meters.set("борис", 10.0, "", t0).unwrap();
+        let worst = meters.worst(t0).unwrap();
+        check(
+            "метр берёт худшее, а не среднее",
+            worst.by == "анна" && worst.is_pain(t0),
+            "10 и 70 — это 70, а не 40".to_string(),
+        );
+        check(
+            "показание стареет без подтверждения",
+            meters.pain(t0 + 86_400).is_none(),
+            "через сутки «было плохо» уже не факт".to_string(),
+        );
+    }
+
+    // --- ЧЕКО: что если ---
+    {
+        let plan_env = Env::open(dir.join("plan")).unwrap();
+        for (cap, object) in [
+            ("rust", "дело А"),
+            ("rust", "дело Б"),
+            ("docs", "документация"),
+        ] {
+            plan_env
+                .leave(&Trace::new(Kind::Need, cap, object, "owner", t0))
+                .unwrap();
+        }
+        let plan = Plan {
+            workers: vec![Worker {
+                capability: "rust".to_string(),
+                count: 1,
+                cost: 600,
+            }],
+            horizon: 86_400,
+            step: 60,
+        };
+        let outcomes = simulate(&plan_env.traces(), &plan, t0);
+        let done: Vec<u64> = outcomes
+            .iter()
+            .filter_map(|o| match o.fate {
+                Fate::Done(at) => Some(at - t0),
+                _ => None,
+            })
+            .collect();
+        check(
+            "симулятор видит очередь: второе дело ждёт первого",
+            done == vec![600, 1200],
+            format!("сделано через {done:?} секунд"),
+        );
+        check(
+            "симулятор показывает молчаливую смерть до запуска",
+            outcomes
+                .iter()
+                .any(|o| matches!(o.fate, Fate::Died(_)) && o.object == "документация"),
+            "Бир давал спорить с моделью, а не с людьми".to_string(),
+        );
+    }
 
     println!("\nитог: {checks} проверок, {fails} провалов");
     let _ = std::fs::remove_dir_all(&dir);
