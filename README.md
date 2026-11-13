@@ -1,6 +1,19 @@
+<div align="center">
+
+<img src="docs/banner.svg" alt="stigmergy banner" width="1000">
+
 # stigmergy — работа как след в среде, а не как карточка в доске
 
-Координация без доски, без очереди, без владельца и без диспетчера.
+### Координация без доски, без очереди, без владельца и без диспетчера.
+
+[![CI](https://github.com/kostyk348/stigmergy/actions/workflows/tests.yml/badge.svg)](https://github.com/kostyk348/stigmergy/actions/workflows/tests.yml)
+[![Release](https://img.shields.io/github/v/release/kostyk348/stigmergy?sort=semver&color=0ea5e9&label=release)](https://github.com/kostyk348/stigmergy/releases)
+[![Language](https://img.shields.io/badge/lang-Rust-blueviolet)](https://github.com/kostyk348/stigmergy)
+
+</div>
+
+---
+
 
 ```bash
 stig need   --env DIR --capability rust --object "разобрать RFC 791"
